@@ -10,14 +10,14 @@
         Drop="Window_Drop"
         AllowDrop="True"
         DragOver="Window_DragOver">
-    
+
     <Grid>
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
-        
+
         <!-- Top toolbar -->
         <Border Grid.Row="0" Background="#2D2D2D" Padding="10,5">
             <Grid>
@@ -26,7 +26,7 @@
                     <ColumnDefinition Width="Auto"/>
                     <ColumnDefinition Width="*"/>
                 </Grid.ColumnDefinitions>
-                
+
                 <!-- Left side - File info -->
                 <TextBlock x:Name="FileNameText" 
                            Grid.Column="0"
@@ -34,7 +34,7 @@
                            VerticalAlignment="Center"
                            FontSize="14"
                            TextTrimming="CharacterEllipsis"/>
-                
+
                 <!-- Center - Zoom controls -->
                 <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Center">
                     <Button Content="-" Style="{StaticResource ToolbarButton}" Click="ZoomOut_Click" ToolTip="Zoom Out (-)"/>
@@ -49,17 +49,26 @@
                     <Button Content="Fit" Style="{StaticResource ToolbarButton}" Click="FitToWindow_Click" Margin="10,0,0,0" ToolTip="Fit to Window (F)"/>
                     <Button Content="100%" Style="{StaticResource ToolbarButton}" Click="ActualSize_Click" ToolTip="Actual Size (1)"/>
                 </StackPanel>
-                
-                <!-- Right side - Image counter -->
-                <TextBlock x:Name="ImageCountText" 
-                           Grid.Column="2"
-                           Foreground="#CCCCCC" 
-                           VerticalAlignment="Center"
-                           HorizontalAlignment="Right"
-                           FontSize="14"/>
+
+                <!-- Right side - Sort toggle and Image counter -->
+                <StackPanel Grid.Column="2" Orientation="Horizontal" HorizontalAlignment="Right">
+                    <TextBlock x:Name="SortLabel" 
+                               Text="Sort: Name (A-Z)" 
+                               Foreground="#999999" 
+                               VerticalAlignment="Center" 
+                               FontSize="12"
+                               Cursor="Hand"
+                               ToolTip="Double-click to change sort order"
+                               MouseLeftButtonDown="SortLabel_MouseLeftButtonDown"/>
+                    <TextBlock x:Name="ImageCountText" 
+                               Foreground="#CCCCCC" 
+                               VerticalAlignment="Center"
+                               Margin="20,0,0,0"
+                               FontSize="14"/>
+                </StackPanel>
             </Grid>
         </Border>
-        
+
         <!-- Main image area -->
         <Grid Grid.Row="1" x:Name="ImageContainer" ClipToBounds="True">
             <Canvas x:Name="ImageCanvas" 
@@ -88,7 +97,7 @@
                         </DrawingBrush.Drawing>
                     </DrawingBrush>
                 </Canvas.Background>
-                
+
                 <Image x:Name="MainImage"
                        MouseWheel="MainImage_MouseWheel"
                        MouseLeftButtonDown="MainImage_MouseLeftButtonDown"
@@ -97,7 +106,7 @@
                        Stretch="Uniform"
                        RenderOptions.BitmapScalingMode="HighQuality"/>
             </Canvas>
-            
+
             <!-- Navigation buttons -->
             <Button Content="&#9664;" 
                     Style="{StaticResource NavButton}" 
@@ -106,7 +115,7 @@
                     Margin="20,0"
                     Click="Previous_Click"
                     ToolTip="Previous"/>
-            
+
             <Button Content="&#9654;" 
                     Style="{StaticResource NavButton}" 
                     HorizontalAlignment="Right" 
@@ -114,7 +123,7 @@
                     Margin="20,0"
                     Click="Next_Click"
                     ToolTip="Next"/>
-            
+
             <!-- Drop hint when no image loaded -->
             <TextBlock x:Name="DropHint"
                        Text="Drop an image here or press O to open"
@@ -123,7 +132,7 @@
                        HorizontalAlignment="Center"
                        VerticalAlignment="Center"/>
         </Grid>
-        
+
         <!-- Bottom status bar -->
         <Border Grid.Row="2" Background="#2D2D2D" Padding="10,5">
             <Grid>
@@ -131,12 +140,12 @@
                     <ColumnDefinition Width="*"/>
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
-                
+
                 <TextBlock x:Name="ImageInfoText" 
                            Grid.Column="0"
                            Foreground="#999999" 
                            FontSize="12"/>
-                
+
                 <TextBlock Grid.Column="1"
                            Foreground="#666666" 
                            FontSize="12"

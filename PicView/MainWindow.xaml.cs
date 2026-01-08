@@ -8,11 +8,17 @@ using Microsoft.Win32;
 
 namespace PicView;
 
+public enum SortMode
+{
+    NameAscending,
+    DateModifiedDescending
+}
+
 public partial class MainWindow : Window
 {
-    private static readonly string[] SupportedExtensions = 
-    { 
-        ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tif", ".ico" 
+    private static readonly string[] SupportedExtensions =
+    {
+        ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tif", ".ico"
     };
 
     private List<string> _imageFiles = new();
@@ -20,18 +26,21 @@ public partial class MainWindow : Window
     private double _currentZoom = 1.0;
     private Point _lastMousePosition;
     private bool _isDragging;
-    
+
     // Image position (top-left corner in canvas coordinates)
     private double _imageX;
     private double _imageY;
+
+    // Sorting
+    private SortMode _currentSortMode = SortMode.NameAscending;
 
     public MainWindow()
     {
         InitializeComponent();
         UpdateUI();
-        
+
         // Handle window resize to fit image
-        ImageCanvas.SizeChanged += (s, e) => 
+        ImageCanvas.SizeChanged += (s, e) =>
         {
             if (MainImage.Source != null)
                 FitImageToWindow();
@@ -50,13 +59,14 @@ public partial class MainWindow : Window
         if (string.IsNullOrEmpty(directory)) return;
 
         // Get all image files in the directory
-        _imageFiles = Directory.GetFiles(directory)
-            .Where(f => SupportedExtensions.Contains(Path.GetExtension(f).ToLowerInvariant()))
-            .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
-            .ToList();
+        var files = Directory.GetFiles(directory)
+            .Where(f => SupportedExtensions.Contains(Path.GetExtension(f).ToLowerInvariant()));
+
+        // Apply current sort mode
+        _imageFiles = ApplySort(files).ToList();
 
         // Find the index of the requested file
-        _currentIndex = _imageFiles.FindIndex(f => 
+        _currentIndex = _imageFiles.FindIndex(f =>
             string.Equals(f, filePath, StringComparison.OrdinalIgnoreCase));
 
         if (_currentIndex == -1)
@@ -67,6 +77,48 @@ public partial class MainWindow : Window
         }
 
         DisplayCurrentImage();
+    }
+
+    private IEnumerable<string> ApplySort(IEnumerable<string> files)
+    {
+        return _currentSortMode switch
+        {
+            SortMode.NameAscending => files.OrderBy(f => f, StringComparer.OrdinalIgnoreCase),
+            SortMode.DateModifiedDescending => files.OrderByDescending(f => new FileInfo(f).LastWriteTime),
+            _ => files.OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
+        };
+    }
+
+    private void ResortFiles()
+    {
+        if (_imageFiles.Count == 0) return;
+
+        // Remember current file
+        string? currentFile = _currentIndex >= 0 && _currentIndex < _imageFiles.Count
+            ? _imageFiles[_currentIndex]
+            : null;
+
+        // Re-sort the list
+        _imageFiles = ApplySort(_imageFiles).ToList();
+
+        // Find the current file in the new order
+        if (currentFile != null)
+        {
+            _currentIndex = _imageFiles.FindIndex(f =>
+                string.Equals(f, currentFile, StringComparison.OrdinalIgnoreCase));
+        }
+
+        UpdateUI();
+    }
+
+    private void UpdateSortLabel()
+    {
+        SortLabel.Text = _currentSortMode switch
+        {
+            SortMode.NameAscending => "Sort: Name (A-Z)",
+            SortMode.DateModifiedDescending => "Sort: Date (Newest)",
+            _ => "Sort: Name (A-Z)"
+        };
     }
 
     private void DisplayCurrentImage()
@@ -81,7 +133,7 @@ public partial class MainWindow : Window
         try
         {
             var filePath = _imageFiles[_currentIndex];
-            
+
             // Load image with caching for better performance
             var bitmap = new BitmapImage();
             bitmap.BeginInit();
@@ -91,14 +143,14 @@ public partial class MainWindow : Window
             bitmap.Freeze();
 
             MainImage.Source = bitmap;
-            
+
             // Update window title
             Title = $"PicView - {Path.GetFileName(filePath)}";
-            
+
             UpdateUI();
-            
+
             // Fit to window after layout
-            Dispatcher.BeginInvoke(new Action(FitImageToWindow), 
+            Dispatcher.BeginInvoke(new Action(FitImageToWindow),
                 System.Windows.Threading.DispatcherPriority.Loaded);
         }
         catch (Exception ex)
@@ -120,7 +172,7 @@ public partial class MainWindow : Window
 
             FileNameText.Text = Path.GetFileName(filePath);
             ImageCountText.Text = $"{_currentIndex + 1} / {_imageFiles.Count}";
-            
+
             if (bitmap != null)
             {
                 var sizeText = FormatFileSize(fileInfo.Length);
@@ -136,6 +188,7 @@ public partial class MainWindow : Window
         }
 
         ZoomText.Text = $"{_currentZoom:P0}";
+        UpdateSortLabel();
     }
 
     private static string FormatFileSize(long bytes)
@@ -160,16 +213,16 @@ public partial class MainWindow : Window
 
         if (containerWidth <= 0 || containerHeight <= 0)
         {
-            Dispatcher.BeginInvoke(new Action(FitImageToWindow), 
+            Dispatcher.BeginInvoke(new Action(FitImageToWindow),
                 System.Windows.Threading.DispatcherPriority.Background);
             return;
         }
 
         var scaleX = containerWidth / bitmap.PixelWidth;
         var scaleY = containerHeight / bitmap.PixelHeight;
-        
+
         _currentZoom = Math.Min(scaleX, scaleY);
-        
+
         // Don't upscale small images beyond 100%
         if (_currentZoom > 1.0) _currentZoom = 1.0;
 
@@ -181,7 +234,7 @@ public partial class MainWindow : Window
     private void ApplyZoom()
     {
         if (MainImage.Source is not BitmapSource bitmap) return;
-        
+
         MainImage.Width = bitmap.PixelWidth * _currentZoom;
         MainImage.Height = bitmap.PixelHeight * _currentZoom;
     }
@@ -207,20 +260,20 @@ public partial class MainWindow : Window
         if (MainImage.Source is not BitmapSource bitmap) return;
 
         newZoom = Math.Clamp(newZoom, 0.01, 50.0);
-        
+
         if (Math.Abs(_currentZoom - newZoom) < 0.001) return;
 
         if (mousePositionInCanvas.HasValue)
         {
             // Zoom toward mouse position
             var mousePos = mousePositionInCanvas.Value;
-            
+
             // Calculate position relative to image before zoom
             var relX = (mousePos.X - _imageX) / _currentZoom;
             var relY = (mousePos.Y - _imageY) / _currentZoom;
-            
+
             _currentZoom = newZoom;
-            
+
             // Calculate new image position to keep the point under mouse stationary
             _imageX = mousePos.X - relX * _currentZoom;
             _imageY = mousePos.Y - relY * _currentZoom;
@@ -230,12 +283,12 @@ public partial class MainWindow : Window
             // Zoom toward center of canvas
             var centerX = ImageCanvas.ActualWidth / 2;
             var centerY = ImageCanvas.ActualHeight / 2;
-            
+
             var relX = (centerX - _imageX) / _currentZoom;
             var relY = (centerY - _imageY) / _currentZoom;
-            
+
             _currentZoom = newZoom;
-            
+
             _imageX = centerX - relX * _currentZoom;
             _imageY = centerY - relY * _currentZoom;
         }
@@ -316,13 +369,13 @@ public partial class MainWindow : Window
         var filePath = _imageFiles[_currentIndex];
         var directory = Path.GetDirectoryName(filePath);
         var fileNameWithoutExt = Path.GetFileNameWithoutExtension(filePath);
-        
+
         // Find corresponding video file using wildcard
         string? videoFile = null;
         if (!string.IsNullOrEmpty(directory))
         {
             videoFile = Directory.GetFiles(directory, fileNameWithoutExt + ".*")
-                .FirstOrDefault(f => !f.Equals(filePath, StringComparison.OrdinalIgnoreCase) 
+                .FirstOrDefault(f => !f.Equals(filePath, StringComparison.OrdinalIgnoreCase)
                     && !SupportedExtensions.Contains(Path.GetExtension(f).ToLowerInvariant()));
         }
 
@@ -503,6 +556,19 @@ public partial class MainWindow : Window
         }
     }
 
+    private void SortLabel_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (e.ClickCount == 2)
+        {
+            // Toggle sort mode
+            _currentSortMode = _currentSortMode == SortMode.NameAscending
+                ? SortMode.DateModifiedDescending
+                : SortMode.NameAscending;
+
+            ResortFiles();
+        }
+    }
+
     private void MainImage_MouseWheel(object sender, MouseWheelEventArgs e)
     {
         var mousePos = e.GetPosition(ImageCanvas);
@@ -539,19 +605,19 @@ public partial class MainWindow : Window
         _imageX += deltaX;
         _imageY += deltaY;
         ClampPan();
-        
+
         Canvas.SetLeft(MainImage, _imageX);
         Canvas.SetTop(MainImage, _imageY);
     }
 
     private void Previous_Click(object sender, RoutedEventArgs e) => NavigatePrevious();
     private void Next_Click(object sender, RoutedEventArgs e) => NavigateNext();
-    
+
     private void ZoomIn_Click(object sender, RoutedEventArgs e) => SetZoom(_currentZoom * 1.25);
     private void ZoomOut_Click(object sender, RoutedEventArgs e) => SetZoom(_currentZoom / 1.25);
-    
+
     private void FitToWindow_Click(object sender, RoutedEventArgs e) => FitImageToWindow();
-    
+
     private void ActualSize_Click(object sender, RoutedEventArgs e)
     {
         _currentZoom = 1.0;
@@ -567,9 +633,9 @@ public partial class MainWindow : Window
             var files = (string[])e.Data.GetData(DataFormats.FileDrop);
             if (files?.Length > 0)
             {
-                var firstImage = files.FirstOrDefault(f => 
+                var firstImage = files.FirstOrDefault(f =>
                     SupportedExtensions.Contains(Path.GetExtension(f).ToLowerInvariant()));
-                
+
                 if (firstImage != null)
                 {
                     LoadImage(firstImage);
@@ -580,8 +646,8 @@ public partial class MainWindow : Window
 
     private void Window_DragOver(object sender, DragEventArgs e)
     {
-        e.Effects = e.Data.GetDataPresent(DataFormats.FileDrop) 
-            ? DragDropEffects.Copy 
+        e.Effects = e.Data.GetDataPresent(DataFormats.FileDrop)
+            ? DragDropEffects.Copy
             : DragDropEffects.None;
         e.Handled = true;
     }
