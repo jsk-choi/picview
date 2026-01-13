@@ -34,6 +34,10 @@ public partial class MainWindow : Window
     // Sorting
     private SortMode _currentSortMode = SortMode.NameAscending;
 
+    // Clipboard collection for image/video pairs
+    private readonly HashSet<string> _clipboardImageSet = new(StringComparer.OrdinalIgnoreCase);
+    private readonly List<string> _clipboardEntries = new();
+
     public MainWindow()
     {
         InitializeComponent();
@@ -491,6 +495,89 @@ public partial class MainWindow : Window
         }
     }
 
+    private void AddToClipboardList()
+    {
+        if (_currentIndex < 0 || _currentIndex >= _imageFiles.Count) return;
+
+        var imagePath = _imageFiles[_currentIndex];
+
+        // Check if already in clipboard list
+        if (_clipboardImageSet.Contains(imagePath)) return;
+
+        var directory = Path.GetDirectoryName(imagePath);
+        var fileNameWithoutExt = Path.GetFileNameWithoutExtension(imagePath);
+
+        // Find corresponding video file
+        string? videoFile = null;
+        if (!string.IsNullOrEmpty(directory))
+        {
+            videoFile = Directory.GetFiles(directory, fileNameWithoutExt + ".*")
+                .FirstOrDefault(f => !f.Equals(imagePath, StringComparison.OrdinalIgnoreCase)
+                    && !SupportedExtensions.Contains(Path.GetExtension(f).ToLowerInvariant()));
+        }
+
+        // Add to tracking set
+        _clipboardImageSet.Add(imagePath);
+
+        // Add both paths to the entries list
+        _clipboardEntries.Add(imagePath);
+        if (videoFile != null)
+        {
+            _clipboardEntries.Add(videoFile);
+        }
+
+        // Update system clipboard with all entries
+        var clipboardText = string.Join(Environment.NewLine, _clipboardEntries);
+        Clipboard.SetText(clipboardText);
+
+        // Show feedback
+        var count = _clipboardImageSet.Count;
+        var videoStatus = videoFile != null ? " + video" : "";
+        Title = $"PicView - Added to clipboard ({count} image{(count > 1 ? "s" : "")}){videoStatus}";
+    }
+
+    private void ClearClipboardList()
+    {
+        _clipboardImageSet.Clear();
+        _clipboardEntries.Clear();
+        Clipboard.Clear();
+
+        // Restore normal title
+        if (_currentIndex >= 0 && _currentIndex < _imageFiles.Count)
+        {
+            Title = $"PicView - {Path.GetFileName(_imageFiles[_currentIndex])}";
+        }
+        else
+        {
+            Title = "PicView";
+        }
+    }
+
+    private void OpenCorrespondingVideo()
+    {
+        if (_currentIndex < 0 || _currentIndex >= _imageFiles.Count) return;
+
+        var imagePath = _imageFiles[_currentIndex];
+        var directory = Path.GetDirectoryName(imagePath);
+        var fileNameWithoutExt = Path.GetFileNameWithoutExtension(imagePath);
+
+        if (string.IsNullOrEmpty(directory)) return;
+
+        // Find corresponding video file
+        var videoFile = Directory.GetFiles(directory, fileNameWithoutExt + ".*")
+            .FirstOrDefault(f => !f.Equals(imagePath, StringComparison.OrdinalIgnoreCase)
+                && !SupportedExtensions.Contains(Path.GetExtension(f).ToLowerInvariant()));
+
+        if (videoFile != null)
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = videoFile,
+                UseShellExecute = true
+            });
+        }
+    }
+
     #region Event Handlers
 
     private void Window_KeyDown(object sender, KeyEventArgs e)
@@ -546,6 +633,15 @@ public partial class MainWindow : Window
                 break;
             case Key.F2:
                 RenameCurrentFile();
+                break;
+            case Key.C:
+                AddToClipboardList();
+                break;
+            case Key.X:
+                ClearClipboardList();
+                break;
+            case Key.Enter:
+                OpenCorrespondingVideo();
                 break;
             case Key.Escape:
                 FitImageToWindow();
