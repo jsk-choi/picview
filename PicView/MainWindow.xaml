@@ -58,7 +58,7 @@
                                VerticalAlignment="Center" 
                                FontSize="12"
                                Cursor="Hand"
-                               ToolTip="Double-click to change sort order"
+                               ToolTip="Click to change sort order"
                                MouseLeftButtonDown="SortLabel_MouseLeftButtonDown"/>
                     <TextBlock x:Name="ImageCountText" 
                                Foreground="#CCCCCC" 

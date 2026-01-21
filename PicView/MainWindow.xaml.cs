@@ -1,4 +1,6 @@
 using System.IO;
+using System.Runtime.InteropServices;
+using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -12,6 +14,25 @@ public enum SortMode
 {
     NameAscending,
     DateModifiedDescending
+}
+
+/// <summary>
+/// Comparer that uses Windows Explorer's natural sort order (StrCmpLogicalW)
+/// </summary>
+public class NaturalFileNameComparer : IComparer<string>
+{
+    [DllImport("shlwapi.dll", CharSet = CharSet.Unicode)]
+    private static extern int StrCmpLogicalW(string psz1, string psz2);
+
+    public int Compare(string? x, string? y)
+    {
+        if (x == null && y == null) return 0;
+        if (x == null) return -1;
+        if (y == null) return 1;
+        
+        // Compare by filename only (not full path) to match Explorer behavior
+        return StrCmpLogicalW(Path.GetFileName(x), Path.GetFileName(y));
+    }
 }
 
 public partial class MainWindow : Window
@@ -34,6 +55,12 @@ public partial class MainWindow : Window
     // Sorting
     private SortMode _currentSortMode = SortMode.NameAscending;
 
+    // Settings file path
+    private static readonly string SettingsFilePath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "PicView",
+        "settings.json");
+
     // Clipboard collection for image/video pairs
     private readonly HashSet<string> _clipboardImageSet = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<string> _clipboardEntries = new();
@@ -41,6 +68,10 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        
+        // Load saved sort mode
+        LoadSettings();
+        
         UpdateUI();
 
         // Handle window resize to fit image
@@ -49,6 +80,52 @@ public partial class MainWindow : Window
             if (MainImage.Source != null)
                 FitImageToWindow();
         };
+    }
+
+    private void LoadSettings()
+    {
+        try
+        {
+            if (File.Exists(SettingsFilePath))
+            {
+                var json = File.ReadAllText(SettingsFilePath);
+                var settings = JsonSerializer.Deserialize<AppSettings>(json);
+                if (settings != null && Enum.TryParse<SortMode>(settings.SortMode, out var sortMode))
+                {
+                    _currentSortMode = sortMode;
+                }
+            }
+        }
+        catch
+        {
+            // Use default if settings can't be loaded
+            _currentSortMode = SortMode.NameAscending;
+        }
+    }
+
+    private void SaveSettings()
+    {
+        try
+        {
+            var directory = Path.GetDirectoryName(SettingsFilePath);
+            if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            var settings = new AppSettings { SortMode = _currentSortMode.ToString() };
+            var json = JsonSerializer.Serialize(settings, new JsonSerializerOptions { WriteIndented = true });
+            File.WriteAllText(SettingsFilePath, json);
+        }
+        catch
+        {
+            // Ignore save errors
+        }
+    }
+
+    private class AppSettings
+    {
+        public string SortMode { get; set; } = "NameAscending";
     }
 
     public void LoadImage(string filePath)
@@ -87,9 +164,9 @@ public partial class MainWindow : Window
     {
         return _currentSortMode switch
         {
-            SortMode.NameAscending => files.OrderBy(f => f, StringComparer.OrdinalIgnoreCase),
+            SortMode.NameAscending => files.OrderBy(f => f, new NaturalFileNameComparer()),
             SortMode.DateModifiedDescending => files.OrderByDescending(f => new FileInfo(f).LastWriteTime),
-            _ => files.OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
+            _ => files.OrderBy(f => f, new NaturalFileNameComparer())
         };
     }
 
@@ -654,15 +731,15 @@ public partial class MainWindow : Window
 
     private void SortLabel_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
-        if (e.ClickCount == 2)
-        {
-            // Toggle sort mode
-            _currentSortMode = _currentSortMode == SortMode.NameAscending
-                ? SortMode.DateModifiedDescending
-                : SortMode.NameAscending;
+        // Single-click to toggle sort mode
+        _currentSortMode = _currentSortMode == SortMode.NameAscending
+            ? SortMode.DateModifiedDescending
+            : SortMode.NameAscending;
 
-            ResortFiles();
-        }
+        // Save the preference
+        SaveSettings();
+
+        ResortFiles();
     }
 
     private void MainImage_MouseWheel(object sender, MouseWheelEventArgs e)
