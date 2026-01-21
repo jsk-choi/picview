@@ -192,6 +192,47 @@ public partial class MainWindow : Window
         UpdateUI();
     }
 
+    private void RefreshFiles()
+    {
+        if (_imageFiles.Count == 0) return;
+
+        // Remember current file
+        string? currentFile = _currentIndex >= 0 && _currentIndex < _imageFiles.Count
+            ? _imageFiles[_currentIndex]
+            : null;
+
+        if (currentFile == null) return;
+
+        var directory = Path.GetDirectoryName(currentFile);
+        if (string.IsNullOrEmpty(directory) || !Directory.Exists(directory)) return;
+
+        // Re-read the directory
+        var files = Directory.GetFiles(directory)
+            .Where(f => SupportedExtensions.Contains(Path.GetExtension(f).ToLowerInvariant()));
+
+        _imageFiles = ApplySort(files).ToList();
+
+        if (_imageFiles.Count == 0)
+        {
+            _currentIndex = -1;
+            MainImage.Source = null;
+            UpdateUI();
+            return;
+        }
+
+        // Try to find the same file
+        _currentIndex = _imageFiles.FindIndex(f =>
+            string.Equals(f, currentFile, StringComparison.OrdinalIgnoreCase));
+
+        // If file was deleted, stay at valid index
+        if (_currentIndex == -1)
+        {
+            _currentIndex = 0;
+        }
+
+        DisplayCurrentImage();
+    }
+
     private void UpdateSortLabel()
     {
         SortLabel.Text = _currentSortMode switch
@@ -725,6 +766,9 @@ public partial class MainWindow : Window
                 break;
             case Key.F11:
                 WindowState = WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized;
+                break;
+            case Key.F5:
+                RefreshFiles();
                 break;
         }
     }

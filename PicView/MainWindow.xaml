@@ -149,7 +149,7 @@
                 <TextBlock Grid.Column="1"
                            Foreground="#666666" 
                            FontSize="12"
-                           Text="Scroll: Zoom | Drag: Pan | Arrows: Navigate | F: Fit | 1: 100% | O: Open | F2: Rename | Del: Delete | C: Collect | Enter: Play Video"/>
+                           Text="Scroll: Zoom | Drag: Pan | Arrows: Navigate | F: Fit | 1: 100% | O: Open | F2: Rename | Del: Delete | C: Collect | Enter: Play Video | F5: Refresh"/>
             </Grid>
         </Border>
     </Grid>
