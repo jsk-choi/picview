@@ -5,7 +5,7 @@
 setlocal EnableDelayedExpansion
 
 :: Get the full path to the executable
-set "EXEPATH=%~dp0PicView\bin\Release\net8.0-windows\PicView.exe"
+set "EXEPATH=%~dp0PicView\bin\Release\net10.0-windows\PicView.exe"
 
 :: Check if running as admin
 net session >nul 2>&1
