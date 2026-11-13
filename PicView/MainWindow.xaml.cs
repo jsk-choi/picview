@@ -760,6 +760,7 @@ public partial class MainWindow : Window
                 break;
             case Key.Enter:
                 OpenCorrespondingVideo();
+                e.Handled = true;
                 break;
             case Key.Escape:
                 FitImageToWindow();
