@@ -1,4 +1,4 @@
-using System.IO;
+﻿using System.IO;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Windows;
@@ -42,8 +42,20 @@ public partial class MainWindow : Window
         ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tif", ".ico"
     };
 
+    // Extensions treated as a companion video, in order of preference when several exist
+    private static readonly string[] VideoExtensions =
+    {
+        ".mp4", ".mov", ".m4v", ".mkv", ".avi", ".wmv", ".webm", ".3gp", ".mts", ".m2ts"
+    };
+
+    private const string DefaultHint = "Drop an image here or press O to open";
+
     private List<string> _imageFiles = new();
     private int _currentIndex = -1;
+
+    // Cached when the image loads so zooming doesn't hit the disk (and can't fail if the file vanishes)
+    private string _currentInfoText = "";
+    private string? _loadError;
     private double _currentZoom = 1.0;
     private Point _lastMousePosition;
     private bool _isDragging;
@@ -128,11 +140,77 @@ public partial class MainWindow : Window
         public string SortMode { get; set; } = "NameAscending";
     }
 
+    private static bool IsSupportedImage(string path) =>
+        SupportedExtensions.Contains(Path.GetExtension(path).ToLowerInvariant());
+
+    /// <summary>
+    /// Finds a video in the same folder with exactly the same base name (e.g. IMG_1.jpg → IMG_1.mp4).
+    /// </summary>
+    private static string? FindCompanionVideo(string imagePath)
+    {
+        var directory = Path.GetDirectoryName(imagePath);
+        if (string.IsNullOrEmpty(directory)) return null;
+
+        var baseName = Path.GetFileNameWithoutExtension(imagePath);
+        try
+        {
+            // The wildcard is only a pre-filter: "*" also matches dots, so check the base name exactly
+            var candidates = Directory.EnumerateFiles(directory, baseName + ".*")
+                .Where(f => string.Equals(Path.GetFileNameWithoutExtension(f), baseName, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            foreach (var ext in VideoExtensions)
+            {
+                var match = candidates.FirstOrDefault(f =>
+                    string.Equals(Path.GetExtension(f), ext, StringComparison.OrdinalIgnoreCase));
+                if (match != null) return match;
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+        }
+        return null;
+    }
+
+    private static bool TrySetClipboardText(string text)
+    {
+        try
+        {
+            if (text.Length == 0)
+                Clipboard.Clear();
+            else
+                Clipboard.SetText(text);
+            return true;
+        }
+        catch (ExternalException)
+        {
+            // Another app is holding the clipboard open
+            return false;
+        }
+    }
+
     public void LoadImage(string filePath)
     {
+        try
+        {
+            // Normalize relative paths, 8.3 short names, forward slashes, etc. so the lookup below matches
+            filePath = Path.GetFullPath(filePath);
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            MessageBox.Show($"Invalid path: {filePath}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            return;
+        }
+
         if (!File.Exists(filePath))
         {
             MessageBox.Show($"File not found: {filePath}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            return;
+        }
+
+        if (!IsSupportedImage(filePath))
+        {
+            MessageBox.Show($"Unsupported file type: {Path.GetExtension(filePath)}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
             return;
         }
 
@@ -140,8 +218,7 @@ public partial class MainWindow : Window
         if (string.IsNullOrEmpty(directory)) return;
 
         // Get all image files in the directory
-        var files = Directory.GetFiles(directory)
-            .Where(f => SupportedExtensions.Contains(Path.GetExtension(f).ToLowerInvariant()));
+        var files = Directory.GetFiles(directory).Where(IsSupportedImage);
 
         // Apply current sort mode
         _imageFiles = ApplySort(files).ToList();
@@ -189,6 +266,8 @@ public partial class MainWindow : Window
                 string.Equals(f, currentFile, StringComparison.OrdinalIgnoreCase));
         }
 
+        // The neighbours have changed
+        PreloadAroundCurrent();
         UpdateUI();
     }
 
@@ -206,30 +285,25 @@ public partial class MainWindow : Window
         var directory = Path.GetDirectoryName(currentFile);
         if (string.IsNullOrEmpty(directory) || !Directory.Exists(directory)) return;
 
+        var previousIndex = _currentIndex;
+
         // Re-read the directory
-        var files = Directory.GetFiles(directory)
-            .Where(f => SupportedExtensions.Contains(Path.GetExtension(f).ToLowerInvariant()));
+        var files = Directory.GetFiles(directory).Where(IsSupportedImage);
 
         _imageFiles = ApplySort(files).ToList();
-
-        if (_imageFiles.Count == 0)
-        {
-            _currentIndex = -1;
-            MainImage.Source = null;
-            UpdateUI();
-            return;
-        }
 
         // Try to find the same file
         _currentIndex = _imageFiles.FindIndex(f =>
             string.Equals(f, currentFile, StringComparison.OrdinalIgnoreCase));
 
-        // If file was deleted, stay at valid index
+        // If it was removed, stay near where we were (-1 if the folder is now empty)
         if (_currentIndex == -1)
         {
-            _currentIndex = 0;
+            _currentIndex = Math.Min(previousIndex, _imageFiles.Count - 1);
         }
 
+        // F5 means "show me what's on disk now": decode everything fresh
+        ClearImageCache();
         DisplayCurrentImage();
     }
 
@@ -243,63 +317,159 @@ public partial class MainWindow : Window
         };
     }
 
-    private void DisplayCurrentImage()
+    #region Image cache / preloading
+
+    // Decoded images for the current file and its neighbours, keyed by path.
+    private sealed class CacheEntry
     {
+        public required Task<LoadedImage> Task { get; init; }
+        public required CancellationTokenSource Cancel { get; init; }
+    }
+
+    private readonly Dictionary<string, CacheEntry> _imageCache = new(StringComparer.OrdinalIgnoreCase);
+
+    // Limits concurrent decodes so holding an arrow key doesn't start dozens of large decodes at once
+    private static readonly SemaphoreSlim DecodeSlots = new(2);
+
+    // Incremented on every navigation, so a slow load can tell it has been superseded
+    private int _displayVersion;
+
+    private Task<LoadedImage> GetImageAsync(string path)
+    {
+        if (_imageCache.TryGetValue(path, out var entry))
+        {
+            var task = entry.Task;
+            bool usable = !task.IsCompleted
+                || (task.IsCompletedSuccessfully && task.Result.LastWriteUtc == ImageLoader.SafeLastWriteUtc(path));
+            if (usable) return task;
+
+            // Cancelled, or the file changed on disk since it was decoded: load again
+            Evict(path);
+        }
+
+        var cts = new CancellationTokenSource();
+        var token = cts.Token;
+        var loadTask = Task.Run(async () =>
+        {
+            await DecodeSlots.WaitAsync(token);
+            try
+            {
+                token.ThrowIfCancellationRequested();
+                return ImageLoader.Load(path);
+            }
+            finally
+            {
+                DecodeSlots.Release();
+            }
+        }, token);
+
+        _imageCache[path] = new CacheEntry { Task = loadTask, Cancel = cts };
+        return loadTask;
+    }
+
+    private void Evict(string path)
+    {
+        if (_imageCache.Remove(path, out var entry))
+        {
+            entry.Cancel.Cancel();
+        }
+    }
+
+    private void ClearImageCache()
+    {
+        foreach (var path in _imageCache.Keys.ToList()) Evict(path);
+    }
+
+    /// <summary>
+    /// Starts decoding the neighbours of the current image, and drops everything else from the cache.
+    /// </summary>
+    private void PreloadAroundCurrent()
+    {
+        var keep = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        if (_currentIndex >= 0 && _currentIndex < _imageFiles.Count)
+        {
+            var count = _imageFiles.Count;
+            // Current first, then next (the usual direction), then previous. Navigation wraps around.
+            foreach (var offset in new[] { 0, 1, -1 })
+            {
+                keep.Add(_imageFiles[((_currentIndex + offset) % count + count) % count]);
+            }
+        }
+
+        foreach (var path in _imageCache.Keys.Where(p => !keep.Contains(p)).ToList()) Evict(path);
+        foreach (var path in keep) GetImageAsync(path);
+    }
+
+    #endregion
+
+    private async void DisplayCurrentImage()
+    {
+        var version = ++_displayVersion;
+        _loadError = null;
+        _currentInfoText = "";
+
         if (_currentIndex < 0 || _currentIndex >= _imageFiles.Count)
         {
             MainImage.Source = null;
+            PreloadAroundCurrent();
             UpdateUI();
             return;
         }
 
+        var filePath = _imageFiles[_currentIndex];
+        Title = $"PicView - {Path.GetFileName(filePath)}";
+
+        var loadTask = GetImageAsync(filePath);
+        PreloadAroundCurrent();
+
+        if (!loadTask.IsCompleted)
+        {
+            // Not preloaded. Clear the old image rather than leave it up under the new file's
+            // name (so e.g. Del can't act on a file you haven't seen yet).
+            MainImage.Source = null;
+            _loadError = "Loading…";
+            UpdateUI();
+        }
+
+        LoadedImage result;
         try
         {
-            var filePath = _imageFiles[_currentIndex];
-
-            // Load image with caching for better performance
-            var bitmap = new BitmapImage();
-            bitmap.BeginInit();
-            bitmap.UriSource = new Uri(filePath);
-            bitmap.CacheOption = BitmapCacheOption.OnLoad;
-            bitmap.EndInit();
-            bitmap.Freeze();
-
-            MainImage.Source = bitmap;
-
-            // Update window title
-            Title = $"PicView - {Path.GetFileName(filePath)}";
-
-            UpdateUI();
-
-            // Fit to window after layout
-            Dispatcher.BeginInvoke(new Action(FitImageToWindow),
-                System.Windows.Threading.DispatcherPriority.Loaded);
+            // Completes synchronously when the image was preloaded, so it appears with no blank frame
+            result = await loadTask;
         }
-        catch (Exception ex)
+        catch (OperationCanceledException)
         {
-            MessageBox.Show($"Error loading image: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            return; // Superseded by a newer navigation, refresh, etc.
         }
+
+        if (version != _displayVersion) return;
+
+        // A load failure is shown in place instead of in a dialog, so you can keep arrowing past bad files
+        MainImage.Source = result.Bitmap;
+        _loadError = result.Error;
+        _currentInfoText = result.InfoText;
+
+        UpdateUI();
+
+        // Size and position the image now, before it is ever rendered, so it doesn't
+        // briefly appear at the previous image's size and then jump.
+        FitImageToWindow();
     }
 
     private void UpdateUI()
     {
         bool hasImage = MainImage.Source != null;
+        bool hasFile = _currentIndex >= 0 && _currentIndex < _imageFiles.Count;
+
+        DropHint.Text = _loadError ?? DefaultHint;
         DropHint.Visibility = hasImage ? Visibility.Collapsed : Visibility.Visible;
 
-        if (hasImage && _currentIndex >= 0)
+        if (hasFile)
         {
-            var filePath = _imageFiles[_currentIndex];
-            var fileInfo = new FileInfo(filePath);
-            var bitmap = MainImage.Source as BitmapSource;
-
-            FileNameText.Text = Path.GetFileName(filePath);
+            FileNameText.Text = Path.GetFileName(_imageFiles[_currentIndex]);
             ImageCountText.Text = $"{_currentIndex + 1} / {_imageFiles.Count}";
-
-            if (bitmap != null)
-            {
-                var sizeText = FormatFileSize(fileInfo.Length);
-                ImageInfoText.Text = $"{bitmap.PixelWidth} × {bitmap.PixelHeight} px | {sizeText} | {fileInfo.LastWriteTime:g}";
-            }
+            ImageInfoText.Text = _currentInfoText;
         }
         else
         {
@@ -309,21 +479,8 @@ public partial class MainWindow : Window
             Title = "PicView";
         }
 
-        ZoomText.Text = $"{_currentZoom:P0}";
+        ZoomText.Text = hasImage ? $"{_currentZoom:P0}" : "";
         UpdateSortLabel();
-    }
-
-    private static string FormatFileSize(long bytes)
-    {
-        string[] sizes = { "B", "KB", "MB", "GB" };
-        int order = 0;
-        double size = bytes;
-        while (size >= 1024 && order < sizes.Length - 1)
-        {
-            order++;
-            size /= 1024;
-        }
-        return $"{size:0.##} {sizes[order]}";
     }
 
     private void FitImageToWindow()
@@ -335,6 +492,9 @@ public partial class MainWindow : Window
 
         if (containerWidth <= 0 || containerHeight <= 0)
         {
+            // Not laid out yet (e.g. opened from the command line before the window is shown).
+            // Keep the image hidden until it can be sized, so it never flashes at the wrong size.
+            MainImage.Visibility = Visibility.Hidden;
             Dispatcher.BeginInvoke(new Action(FitImageToWindow),
                 System.Windows.Threading.DispatcherPriority.Background);
             return;
@@ -350,6 +510,7 @@ public partial class MainWindow : Window
 
         ApplyZoom();
         CenterImage();
+        MainImage.Visibility = Visibility.Visible;
         UpdateUI();
     }
 
@@ -489,53 +650,41 @@ public partial class MainWindow : Window
         if (_currentIndex < 0 || _currentIndex >= _imageFiles.Count) return;
 
         var filePath = _imageFiles[_currentIndex];
-        var directory = Path.GetDirectoryName(filePath);
-        var fileNameWithoutExt = Path.GetFileNameWithoutExtension(filePath);
+        var videoFile = FindCompanionVideo(filePath);
 
-        // Find corresponding video file using wildcard
-        string? videoFile = null;
-        if (!string.IsNullOrEmpty(directory))
-        {
-            videoFile = Directory.GetFiles(directory, fileNameWithoutExt + ".*")
-                .FirstOrDefault(f => !f.Equals(filePath, StringComparison.OrdinalIgnoreCase)
-                    && !SupportedExtensions.Contains(Path.GetExtension(f).ToLowerInvariant()));
-        }
-
-
+        // Delete the image first: if that fails, nothing has been touched
         try
         {
-            // Delete video file first if it exists
-            if (videoFile != null)
+            Microsoft.VisualBasic.FileIO.FileSystem.DeleteFile(
+                filePath,
+                Microsoft.VisualBasic.FileIO.UIOption.OnlyErrorDialogs,
+                Microsoft.VisualBasic.FileIO.RecycleOption.SendToRecycleBin);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Error deleting file: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            return;
+        }
+
+        if (videoFile != null)
+        {
+            try
             {
                 Microsoft.VisualBasic.FileIO.FileSystem.DeleteFile(
                     videoFile,
                     Microsoft.VisualBasic.FileIO.UIOption.OnlyErrorDialogs,
                     Microsoft.VisualBasic.FileIO.RecycleOption.SendToRecycleBin);
             }
-
-            // Delete the image file
-            Microsoft.VisualBasic.FileIO.FileSystem.DeleteFile(
-                filePath,
-                Microsoft.VisualBasic.FileIO.UIOption.OnlyErrorDialogs,
-                Microsoft.VisualBasic.FileIO.RecycleOption.SendToRecycleBin);
-
-            _imageFiles.RemoveAt(_currentIndex);
-
-            if (_imageFiles.Count == 0)
+            catch (Exception ex)
             {
-                _currentIndex = -1;
-                MainImage.Source = null;
-            }
-            else
-            {
-                _currentIndex = Math.Min(_currentIndex, _imageFiles.Count - 1);
-                DisplayCurrentImage();
+                MessageBox.Show($"The image was deleted, but its video could not be:\n{videoFile}\n\n{ex.Message}",
+                    "Error", MessageBoxButton.OK, MessageBoxImage.Warning);
             }
         }
-        catch (Exception ex)
-        {
-            MessageBox.Show($"Error deleting file: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
-        }
+
+        _imageFiles.RemoveAt(_currentIndex);
+        _currentIndex = Math.Min(_currentIndex, _imageFiles.Count - 1); // -1 when the list is empty
+        DisplayCurrentImage();
     }
 
     private void RenameCurrentFile()
@@ -549,10 +698,7 @@ public partial class MainWindow : Window
 
         if (string.IsNullOrEmpty(directory)) return;
 
-        // Find corresponding video file
-        string? videoFile = Directory.GetFiles(directory, currentName + ".*")
-            .FirstOrDefault(f => !f.Equals(filePath, StringComparison.OrdinalIgnoreCase)
-                && !SupportedExtensions.Contains(Path.GetExtension(f).ToLowerInvariant()));
+        var videoFile = FindCompanionVideo(filePath);
 
         // Show input dialog
         var newName = Microsoft.VisualBasic.Interaction.InputBox(
@@ -560,7 +706,7 @@ public partial class MainWindow : Window
             "Rename",
             currentName);
 
-        // User cancelled or entered empty string
+        // User cancelled, entered nothing, or changed nothing (a change of case alone still counts)
         if (string.IsNullOrWhiteSpace(newName) || newName == currentName) return;
 
         // Validate filename
@@ -571,46 +717,82 @@ public partial class MainWindow : Window
         }
 
         var newImagePath = Path.Combine(directory, newName + imageExtension);
+        var newVideoPath = videoFile != null
+            ? Path.Combine(directory, newName + Path.GetExtension(videoFile))
+            : null;
 
-        // Check if target already exists
-        if (File.Exists(newImagePath))
+        // Check both targets before touching anything. Renaming to the same name with different
+        // case is fine: on Windows the "existing" file is the one being renamed.
+        static bool IsTaken(string target, string source) =>
+            !string.Equals(target, source, StringComparison.OrdinalIgnoreCase)
+            && (File.Exists(target) || Directory.Exists(target));
+
+        if (IsTaken(newImagePath, filePath))
         {
-            MessageBox.Show($"A file named '{newName}{imageExtension}' already exists.", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show($"A file named '{Path.GetFileName(newImagePath)}' already exists.", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            return;
+        }
+
+        if (videoFile != null && newVideoPath != null && IsTaken(newVideoPath, videoFile))
+        {
+            MessageBox.Show($"A file named '{Path.GetFileName(newVideoPath)}' already exists.", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
             return;
         }
 
         try
         {
-            // Rename video file first if it exists
-            if (videoFile != null)
-            {
-                var videoExtension = Path.GetExtension(videoFile);
-                var newVideoPath = Path.Combine(directory, newName + videoExtension);
-
-                if (File.Exists(newVideoPath))
-                {
-                    MessageBox.Show($"A file named '{newName}{videoExtension}' already exists.", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
-                    return;
-                }
-
-                File.Move(videoFile, newVideoPath);
-            }
-
-            // Rename the image file
             File.Move(filePath, newImagePath);
-
-            // Update the file list and re-sort
-            _imageFiles[_currentIndex] = newImagePath;
-
-
-            // Refresh display
-            UpdateUI();
-            Title = $"PicView - {Path.GetFileName(newImagePath)}";
         }
         catch (Exception ex)
         {
             MessageBox.Show($"Error renaming file: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            return;
         }
+
+        if (videoFile != null && newVideoPath != null)
+        {
+            try
+            {
+                File.Move(videoFile, newVideoPath);
+            }
+            catch (Exception videoEx)
+            {
+                // Put the image back so the pair keeps matching names
+                try
+                {
+                    File.Move(newImagePath, filePath);
+                    MessageBox.Show($"Could not rename the video, so nothing was renamed.\n\n{videoEx.Message}",
+                        "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                    return;
+                }
+                catch
+                {
+                    MessageBox.Show($"The image was renamed, but its video could not be:\n{videoFile}\n\n{videoEx.Message}",
+                        "Error", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    newVideoPath = null;
+                }
+            }
+        }
+
+        _imageFiles[_currentIndex] = newImagePath;
+
+        // Keep the collected clipboard list pointing at the files' new names
+        if (_clipboardImageSet.Remove(filePath))
+        {
+            _clipboardImageSet.Add(newImagePath);
+            for (int i = 0; i < _clipboardEntries.Count; i++)
+            {
+                if (string.Equals(_clipboardEntries[i], filePath, StringComparison.OrdinalIgnoreCase))
+                    _clipboardEntries[i] = newImagePath;
+                else if (newVideoPath != null && string.Equals(_clipboardEntries[i], videoFile, StringComparison.OrdinalIgnoreCase))
+                    _clipboardEntries[i] = newVideoPath;
+            }
+            TrySetClipboardText(string.Join(Environment.NewLine, _clipboardEntries));
+        }
+
+        // Move the file to its new place in the sort order (it stays the current image)
+        ResortFiles();
+        Title = $"PicView - {Path.GetFileName(newImagePath)}";
     }
 
     private void AddToClipboardList()
@@ -622,31 +804,21 @@ public partial class MainWindow : Window
         // Check if already in clipboard list
         if (_clipboardImageSet.Contains(imagePath)) return;
 
-        var directory = Path.GetDirectoryName(imagePath);
-        var fileNameWithoutExt = Path.GetFileNameWithoutExtension(imagePath);
+        var videoFile = FindCompanionVideo(imagePath);
 
-        // Find corresponding video file
-        string? videoFile = null;
-        if (!string.IsNullOrEmpty(directory))
+        var newEntries = new List<string>(_clipboardEntries) { imagePath };
+        if (videoFile != null) newEntries.Add(videoFile);
+
+        // Only record it once the clipboard actually accepted it, so pressing C again retries
+        if (!TrySetClipboardText(string.Join(Environment.NewLine, newEntries)))
         {
-            videoFile = Directory.GetFiles(directory, fileNameWithoutExt + ".*")
-                .FirstOrDefault(f => !f.Equals(imagePath, StringComparison.OrdinalIgnoreCase)
-                    && !SupportedExtensions.Contains(Path.GetExtension(f).ToLowerInvariant()));
+            Title = "PicView - Clipboard is in use by another app, press C to try again";
+            return;
         }
 
-        // Add to tracking set
         _clipboardImageSet.Add(imagePath);
-
-        // Add both paths to the entries list
-        _clipboardEntries.Add(imagePath);
-        if (videoFile != null)
-        {
-            _clipboardEntries.Add(videoFile);
-        }
-
-        // Update system clipboard with all entries
-        var clipboardText = string.Join(Environment.NewLine, _clipboardEntries);
-        Clipboard.SetText(clipboardText);
+        _clipboardEntries.Clear();
+        _clipboardEntries.AddRange(newEntries);
 
         // Show feedback
         var count = _clipboardImageSet.Count;
@@ -658,7 +830,12 @@ public partial class MainWindow : Window
     {
         _clipboardImageSet.Clear();
         _clipboardEntries.Clear();
-        Clipboard.Clear();
+
+        if (!TrySetClipboardText(""))
+        {
+            Title = "PicView - List cleared, but the clipboard is in use by another app";
+            return;
+        }
 
         // Restore normal title
         if (_currentIndex >= 0 && _currentIndex < _imageFiles.Count)
@@ -675,24 +852,24 @@ public partial class MainWindow : Window
     {
         if (_currentIndex < 0 || _currentIndex >= _imageFiles.Count) return;
 
-        var imagePath = _imageFiles[_currentIndex];
-        var directory = Path.GetDirectoryName(imagePath);
-        var fileNameWithoutExt = Path.GetFileNameWithoutExtension(imagePath);
+        var videoFile = FindCompanionVideo(_imageFiles[_currentIndex]);
+        if (videoFile == null)
+        {
+            Title = "PicView - No video for this image";
+            return;
+        }
 
-        if (string.IsNullOrEmpty(directory)) return;
-
-        // Find corresponding video file
-        var videoFile = Directory.GetFiles(directory, fileNameWithoutExt + ".*")
-            .FirstOrDefault(f => !f.Equals(imagePath, StringComparison.OrdinalIgnoreCase)
-                && !SupportedExtensions.Contains(Path.GetExtension(f).ToLowerInvariant()));
-
-        if (videoFile != null)
+        try
         {
             System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
             {
                 FileName = videoFile,
                 UseShellExecute = true
             });
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Could not open the video: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
     }
 
@@ -851,8 +1028,7 @@ public partial class MainWindow : Window
             var files = (string[])e.Data.GetData(DataFormats.FileDrop);
             if (files?.Length > 0)
             {
-                var firstImage = files.FirstOrDefault(f =>
-                    SupportedExtensions.Contains(Path.GetExtension(f).ToLowerInvariant()));
+                var firstImage = files.FirstOrDefault(IsSupportedImage);
 
                 if (firstImage != null)
                 {

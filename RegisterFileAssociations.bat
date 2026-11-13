@@ -31,7 +31,7 @@ reg add "HKLM\SOFTWARE\Classes\PicView.Image" /ve /d "Image File" /f
 reg add "HKLM\SOFTWARE\Classes\PicView.Image\shell\open\command" /ve /d "\"%EXEPATH%\" \"%%1\"" /f
 
 :: Associate file types
-for %%e in (jpg jpeg png gif bmp webp tiff tif) do (
+for %%e in (jpg jpeg png gif bmp webp tiff tif ico) do (
     echo Registering .%%e
     reg add "HKLM\SOFTWARE\Classes\.%%e\OpenWithProgids" /v "PicView.Image" /t REG_SZ /d "" /f
 )

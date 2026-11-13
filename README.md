@@ -6,6 +6,8 @@ A lightweight Windows photo viewer that replicates the classic Windows PicView e
 
 - **Click to Open**: Double-click any image or pass it as a command-line argument
 - **Directory Loading**: Automatically loads all images in the same directory
+- **Correct Orientation**: Phone and camera photos are shown upright, following their EXIF orientation tag
+- **Instant Next/Previous**: The images on either side of the current one are decoded in the background, so stepping through a folder doesn't wait on loading
 - **Smooth Zooming**: Mouse wheel zoom centered on cursor position
 - **Pan/Drag**: Click and drag to move the image when zoomed in
 - **Keyboard Navigation**: Full keyboard support for navigation and zoom
@@ -48,7 +50,9 @@ A lightweight Windows photo viewer that replicates the classic Windows PicView e
 
 ## Companion Videos
 
-A companion video is any non-image file in the same folder that shares the image's base name. If there are several, the first one found is used.
+A companion video is a video file in the same folder with exactly the same base name as the image: `IMG_0001.jpg` pairs with `IMG_0001.mp4`, but not with `IMG_0001.edited.mp4` or sidecars like `IMG_0001.xmp`. Recognized extensions, in order of preference when several exist: `.mp4`, `.mov`, `.m4v`, `.mkv`, `.avi`, `.wmv`, `.webm`, `.3gp`, `.mts`, `.m2ts`.
+
+Rename changes both files or neither. Delete removes the image first, then the video.
 
 ## Collecting Paths
 
@@ -99,7 +103,7 @@ PicView.exe "C:\path\to\image.jpg"
 - TIFF (.tiff, .tif)
 - ICO (.ico)
 
-WebP needs the WebP Image Extensions from the Microsoft Store if Windows doesn't already include them. Animated GIFs show their first frame only. `RegisterFileAssociations.bat` registers every format above except `.ico`.
+WebP needs the WebP Image Extensions from the Microsoft Store if Windows doesn't already include them. Animated GIFs show their first frame only. Files that can't be decoded show an error in place of the image, and you can keep navigating past them.
 
 ## Publishing as Single Executable
 

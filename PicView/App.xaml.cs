@@ -8,6 +8,14 @@ public partial class App : Application
     {
         base.OnStartup(e);
 
+        // Last line of defence: report unexpected errors instead of letting the app vanish
+        DispatcherUnhandledException += (_, args) =>
+        {
+            MessageBox.Show($"Something went wrong: {args.Exception.Message}", "PicView",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+            args.Handled = true;
+        };
+
         var mainWindow = new MainWindow();
         
         // If an image path was passed as argument, open it
